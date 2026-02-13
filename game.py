@@ -14,10 +14,10 @@ else:
 
 FRAME_TIME = 0.05
 MOVE_HOLD_TIMEOUT = 0.35
-SHOT_COOLDOWN = 0.1
+SHOT_COOLDOWN = 0.05
 CHARGE_RELEASE_WINDOW = 0.08
 MAX_CHARGE_TIME = 0.75
-DASH_COOLDOWN = 2.2
+DASH_COOLDOWN = 1.5
 DASH_DISTANCE = 7
 DASH_TRAIL_TTL = 0.18
 PROJECTILE_SPEED = 2
@@ -98,6 +98,7 @@ class Player:
     charging: bool = False
     charge_started_at: float = 0.0
     last_charge_input_at: float = 0.0
+    shoot_held_until: float = 0.0
 
     def glyph(self) -> str:
         return LEVEL_PLAYER_GLYPHS[self.level] if self.pid == "p1" else LEVEL_PLAYER2_GLYPHS[self.level]
@@ -260,13 +261,16 @@ class AsciiArenaGame:
             player.charging = True
             player.charge_started_at = now
             player.last_charge_input_at = now
+            player.shoot_held_until = now + CHARGE_RELEASE_WINDOW
         else:
             player.last_charge_input_at = now
+            player.shoot_held_until = now + CHARGE_RELEASE_WINDOW
 
     def maybe_release_charge(self, player: Player, now: float):
         if not player.charging:
             return
-        if now - player.last_charge_input_at < CHARGE_RELEASE_WINDOW and now - player.charge_started_at < MAX_CHARGE_TIME:
+        # Fire only after shoot input has been released (or max charge reached).
+        if now < player.shoot_held_until and now - player.charge_started_at < MAX_CHARGE_TIME:
             return
         charge_time = max(0.0, min(MAX_CHARGE_TIME, now - player.charge_started_at))
         size = 1 if charge_time < 0.15 else (2 if charge_time < 0.4 else 3)

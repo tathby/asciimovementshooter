@@ -20,8 +20,8 @@ No external dependencies are required.
   - **Small** (`30x10`)
   - **Medium** (`44x14`)
   - **Large** (`70x24`)
-- Shooting cooldown is **0.1s**.
-- Hold shoot to charge; release fires larger projectiles (charge fills faster now).
+- Shooting cooldown is **0.05s**.
+- Hold shoot to charge; firing happens on **release** and shot size scales with charge (charge fills faster now).
 - Movement is disabled while charging, but you can still re-aim while charging.
 - Facing indicators show aim direction (`<`, `>`, `^`, `v`), and while charging they switch to the current charge projectile symbol.
 - Dash travels farther and leaves a short-lived trail indicator.
