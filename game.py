@@ -329,20 +329,36 @@ class AsciiArenaGame:
         if not self.bot_mode:
             return
         bot = self.players["p2"]
+        target = self.players["p1"]
         if not bot.alive or now - self.last_bot_action < 0.16:
             return
         self.last_bot_action = now
+
+        # Always orient toward player; movement choice remains randomized.
+        self.aim_toward_opponent(bot, target)
+
         action = random.choice(["move", "move", "move", "jump", "dash", "shoot"])
         if action == "move":
             self.handle_key_for_player(bot, random.choice(["i", "j", "k", "l"]), now)
+            # Re-aim after random movement to keep offense focused.
+            self.aim_toward_opponent(bot, target)
         elif action == "jump":
             self.handle_key_for_player(bot, "o", now)
         elif action == "dash":
             self.handle_key_for_player(bot, "p", now)
         elif action == "shoot" and bot.can_shoot(now):
             self.fire_projectiles(bot, now, 1)
+
         self.apply_continuous_movement(bot, now)
         self.update_level_state(bot, now)
+
+    def aim_toward_opponent(self, shooter: Player, target: Player):
+        dx = target.x - shooter.x
+        dy = target.y - shooter.y
+        if abs(dx) >= abs(dy):
+            shooter.facing = (1 if dx >= 0 else -1, 0)
+        else:
+            shooter.facing = (0, 1 if dy >= 0 else -1)
 
     def dash(self, player: Player, now: float):
         if player.charging or not player.can_dash(now):

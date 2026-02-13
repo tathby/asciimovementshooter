@@ -15,7 +15,7 @@ No external dependencies are required.
 - Top-down arena with **2 vertical levels** now: normal and jump.
 - Main menu modes:
   - **1v1 Local**
-  - **Versus Bot** (simple random-move AI)
+  - **Versus Bot** (random movement AI that actively aims shots toward the player)
 - After selecting a mode, pick one arena size:
   - **Small** (`30x10`)
   - **Medium** (`44x14`)
