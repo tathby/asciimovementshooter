@@ -15,10 +15,15 @@ No external dependencies are required.
 - Top-down arena with **3 vertical levels**: crouch, normal, jump.
 - Main menu modes:
   - **1v1 Local**
-  - **Versus Bot** (simple random-move AI for now)
+  - **Versus Bot** (simple random-move AI)
+- After selecting a mode, pick one arena size:
+  - **Small**
+  - **Medium**
+  - **Large**
 - Jump auto-returns to normal level after a short pause.
 - Crouch returns to normal when crouch input is released/not repeated.
 - Projectiles are level-specific and only hit targets on the same vertical level.
+- Dash now travels farther and leaves a short-lived trail indicator.
 - Dash cooldown and shot cooldown shown in HUD.
 - Timed powerups:
   - `S` Shotgun (temporary 3-shot spread)
@@ -32,4 +37,4 @@ No external dependencies are required.
 - **P2**: `I J K L` move, `O` jump, `H` crouch, `P` dash, `U` shoot
 - During match: `ESC` returns to menu.
 
-> Note: terminal support for standalone `Left Shift` can vary by platform/terminal.
+> Note: standalone `Left Shift` key reporting can vary across terminals/OSes, but dedicated Shift scan-code handling was added for Windows consoles.

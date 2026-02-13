@@ -12,12 +12,11 @@ else:
     import termios
     import tty
 
-ARENA_WIDTH = 70
-ARENA_HEIGHT = 24
 FRAME_TIME = 0.05
 SHOT_COOLDOWN = 0.22
 DASH_COOLDOWN = 2.2
-DASH_DISTANCE = 4
+DASH_DISTANCE = 7
+DASH_TRAIL_TTL = 0.18
 PROJECTILE_SPEED = 2
 POWERUP_SPAWN_INTERVAL = 8.0
 POWERUP_LIFETIME = 14.0
@@ -34,6 +33,12 @@ LEVEL_NAMES = {LEVEL_CROUCH: "CROUCH", LEVEL_NORMAL: "NORMAL", LEVEL_JUMP: "JUMP
 LEVEL_PLAYER_GLYPHS = {LEVEL_CROUCH: ".", LEVEL_NORMAL: "A", LEVEL_JUMP: "^"}
 LEVEL_PLAYER2_GLYPHS = {LEVEL_CROUCH: ",", LEVEL_NORMAL: "B", LEVEL_JUMP: "M"}
 LEVEL_PROJECTILE_GLYPHS = {LEVEL_CROUCH: ".", LEVEL_NORMAL: "*", LEVEL_JUMP: "O"}
+
+ARENA_PRESETS = {
+    "small": (42, 14),
+    "medium": (56, 19),
+    "large": (70, 24),
+}
 
 KEYMAP = {
     "p1": {
@@ -75,6 +80,14 @@ class PowerUp:
     y: int
     kind: str
     spawned_at: float
+
+
+@dataclass
+class DashTrail:
+    x: int
+    y: int
+    glyph: str
+    expires_at: float
 
 
 @dataclass
@@ -130,14 +143,11 @@ class Keyboard:
                 c = msvcrt.getwch()
                 if c in ("\x00", "\xe0"):
                     if msvcrt.kbhit():
-                        scan = msvcrt.getwch()
-                        if scan == "\xa0":
+                        scan = ord(msvcrt.getwch())
+                        if scan in (42, 54, 160, 161):
                             keys.append("<shift>")
                     continue
-                if c == "\r":
-                    keys.append("\n")
-                else:
-                    keys.append(c.lower())
+                keys.append("\n" if c == "\r" else c.lower())
         else:
             while True:
                 readable, _, _ = select.select([sys.stdin], [], [], 0)
@@ -146,16 +156,12 @@ class Keyboard:
                 c = sys.stdin.read(1)
                 if not c:
                     break
-                if c == "\x1b":
-                    keys.append("\x1b")
-                else:
-                    keys.append(c.lower())
+                keys.append(c)
         return keys
 
     def wait_for_any_key(self):
         while True:
-            keys = self.get_keys()
-            if keys:
+            if self.get_keys():
                 return
             time.sleep(0.03)
 
@@ -169,22 +175,51 @@ class AsciiArenaGame:
         self.players: Dict[str, Player] = {}
         self.projectiles: List[Projectile] = []
         self.powerups: List[PowerUp] = []
+        self.dash_trails: List[DashTrail] = []
         self.last_spawn_at = time.time()
         self.scores = {"p1": 0, "p2": 0}
         self.bot_mode = False
         self.last_bot_action = 0.0
+        self.arena_size_name = "large"
+        self.arena_width, self.arena_height = ARENA_PRESETS[self.arena_size_name]
+
+    def select_arena_size(self) -> bool:
+        clear_screen()
+        print("Choose arena size:\n")
+        print("1) Small")
+        print("2) Medium")
+        print("3) Large")
+        print("(Enter/Esc to cancel)")
+        choice = input("\nSelect option: ").strip()
+        if choice == "1":
+            self.arena_size_name = "small"
+        elif choice == "2":
+            self.arena_size_name = "medium"
+        elif choice == "3":
+            self.arena_size_name = "large"
+        else:
+            return False
+        self.arena_width, self.arena_height = ARENA_PRESETS[self.arena_size_name]
+        return True
 
     def reset_round(self):
         self.players = {
-            "p1": Player("p1", "P1", 8, ARENA_HEIGHT // 2, facing=(1, 0)),
-            "p2": Player("p2", "BOT" if self.bot_mode else "P2", ARENA_WIDTH - 9, ARENA_HEIGHT // 2, facing=(-1, 0)),
+            "p1": Player("p1", "P1", 4, self.arena_height // 2, facing=(1, 0)),
+            "p2": Player(
+                "p2",
+                "BOT" if self.bot_mode else "P2",
+                self.arena_width - 5,
+                self.arena_height // 2,
+                facing=(-1, 0),
+            ),
         }
         self.projectiles = []
         self.powerups = []
+        self.dash_trails = []
         self.last_spawn_at = time.time()
 
     def clamp_in_arena(self, x: int, y: int) -> Tuple[int, int]:
-        return max(0, min(ARENA_WIDTH - 1, x)), max(0, min(ARENA_HEIGHT - 1, y))
+        return max(0, min(self.arena_width - 1, x)), max(0, min(self.arena_height - 1, y))
 
     def spawn_powerup_if_needed(self, now: float):
         if now - self.last_spawn_at < POWERUP_SPAWN_INTERVAL:
@@ -192,8 +227,8 @@ class AsciiArenaGame:
         self.last_spawn_at = now
         occupied = {(p.x, p.y) for p in self.players.values()}
         for _ in range(30):
-            x = random.randint(2, ARENA_WIDTH - 3)
-            y = random.randint(2, ARENA_HEIGHT - 3)
+            x = random.randint(1, self.arena_width - 2)
+            y = random.randint(1, self.arena_height - 2)
             if (x, y) not in occupied:
                 self.powerups.append(PowerUp(x, y, random.choice(["shotgun", "dash_boost", "shield"]), now))
                 return
@@ -219,6 +254,17 @@ class AsciiArenaGame:
             player.level = LEVEL_NORMAL
         if player.level == LEVEL_CROUCH and now >= player.crouch_until:
             player.level = LEVEL_NORMAL
+
+    def normalize_key(self, key: str) -> str:
+        if key == "\x1b":
+            return key
+        if key in ("\x00", "\xe0"):
+            return key
+        if key.isalpha():
+            return key.lower()
+        if key == "\x10":  # Ctrl+P fallback sometimes emitted on odd terminals
+            return "<shift>"
+        return key
 
     def handle_key_for_player(self, player: Player, key: str, now: float):
         m = KEYMAP[player.pid]
@@ -248,12 +294,11 @@ class AsciiArenaGame:
             self.shoot(player, now)
 
     def handle_inputs(self, keys: List[str], now: float):
-        if "q" in keys and not self.bot_mode:
-            raise KeyboardInterrupt
-        if "\x1b" in keys:
+        normalized = [self.normalize_key(k) for k in keys]
+        if "\x1b" in normalized:
             raise KeyboardInterrupt
 
-        for key in keys:
+        for key in normalized:
             for player in self.players.values():
                 if not player.alive:
                     continue
@@ -309,6 +354,15 @@ class AsciiArenaGame:
         dx, dy = player.facing
         if dx == 0 and dy == 0:
             dx = 1 if player.pid == "p1" else -1
+
+        trail_glyph = "-" if dx != 0 else "|"
+        start_x, start_y = player.x, player.y
+        for i in range(1, DASH_DISTANCE):
+            tx = start_x - dx * i
+            ty = start_y - dy * i
+            if 0 <= tx < self.arena_width and 0 <= ty < self.arena_height:
+                self.dash_trails.append(DashTrail(tx, ty, trail_glyph, now + DASH_TRAIL_TTL))
+
         player.x, player.y = self.clamp_in_arena(player.x + dx * DASH_DISTANCE, player.y + dy * DASH_DISTANCE)
 
     def step_projectiles(self) -> Optional[str]:
@@ -318,7 +372,7 @@ class AsciiArenaGame:
             for proj in self.projectiles:
                 proj.x += proj.dx
                 proj.y += proj.dy
-                if not (0 <= proj.x < ARENA_WIDTH and 0 <= proj.y < ARENA_HEIGHT):
+                if not (0 <= proj.x < self.arena_width and 0 <= proj.y < self.arena_height):
                     continue
                 hit = False
                 for pid, player in self.players.items():
@@ -339,12 +393,20 @@ class AsciiArenaGame:
                 return scorer
         return None
 
+    def step_dash_trails(self, now: float):
+        self.dash_trails = [t for t in self.dash_trails if now < t.expires_at]
+
     def render(self, now: float):
-        grid = [[" " for _ in range(ARENA_WIDTH)] for _ in range(ARENA_HEIGHT)]
+        grid = [[" " for _ in range(self.arena_width)] for _ in range(self.arena_height)]
+
+        for t in self.dash_trails:
+            if 0 <= t.x < self.arena_width and 0 <= t.y < self.arena_height:
+                grid[t.y][t.x] = t.glyph
+
         for pu in self.powerups:
             grid[pu.y][pu.x] = {"shotgun": "S", "dash_boost": "D", "shield": "H"}[pu.kind]
         for proj in self.projectiles:
-            if 0 <= proj.x < ARENA_WIDTH and 0 <= proj.y < ARENA_HEIGHT:
+            if 0 <= proj.x < self.arena_width and 0 <= proj.y < self.arena_height:
                 grid[proj.y][proj.x] = LEVEL_PROJECTILE_GLYPHS[proj.level]
         for p in self.players.values():
             if p.alive:
@@ -360,16 +422,18 @@ class AsciiArenaGame:
                 buffs.append("DASH+")
             if player.shield:
                 buffs.append("SHIELD")
-            buff_text = ",".join(buffs) if buffs else "-"
-            return f"{player.name} LVL:{LEVEL_NAMES[player.level]:6} DASH:{dash_left:>4.1f}s SHOT:{shot_left:>4.2f}s BUFFS:{buff_text}"
+            return f"{player.name} LVL:{LEVEL_NAMES[player.level]:6} DASH:{dash_left:>4.1f}s SHOT:{shot_left:>4.2f}s BUFFS:{','.join(buffs) if buffs else '-'}"
 
-        score_line = f"SCORE  P1:{self.scores['p1']}   {self.players['p2'].name}:{self.scores['p2']}"
-        lines = [score_line, status(self.players["p1"]), "#" * (ARENA_WIDTH + 2)]
+        score_line = (
+            f"ARENA:{self.arena_size_name.upper():6}  SCORE  P1:{self.scores['p1']}  "
+            f"{self.players['p2'].name}:{self.scores['p2']}"
+        )
+        lines = [score_line, status(self.players["p1"]), "#" * (self.arena_width + 2)]
         for row in grid:
             lines.append("#" + "".join(row) + "#")
-        lines.append("#" * (ARENA_WIDTH + 2))
+        lines.append("#" * (self.arena_width + 2))
         lines.append(status(self.players["p2"]))
-        lines.append("ESC: menu | P1 crouch: Left Shift* | P2 crouch: H")
+        lines.append("ESC: menu | Dash leaves a short trail")
 
         clear_screen()
         print("\n".join(lines), flush=True)
@@ -398,6 +462,7 @@ class AsciiArenaGame:
                     self.spawn_powerup_if_needed(now)
                     self.handle_pickups(now)
                     scorer = self.step_projectiles()
+                    self.step_dash_trails(now)
 
                     self.render(now)
                     if scorer:
@@ -447,10 +512,9 @@ class AsciiArenaGame:
             print("5) Quit")
             choice = input("\nSelect option: ").strip()
 
-            if choice == "1":
-                self.run_match(versus_bot=False)
-            elif choice == "2":
-                self.run_match(versus_bot=True)
+            if choice in ("1", "2"):
+                if self.select_arena_size():
+                    self.run_match(versus_bot=choice == "2")
             elif choice == "3":
                 self.show_controls()
             elif choice == "4":
