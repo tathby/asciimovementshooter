@@ -15,8 +15,8 @@ else:
 FRAME_TIME = 0.05
 MOVE_HOLD_TIMEOUT = 0.35
 SHOT_COOLDOWN = 0.1
-CHARGE_RELEASE_WINDOW = 0.12
-MAX_CHARGE_TIME = 1.2
+CHARGE_RELEASE_WINDOW = 0.08
+MAX_CHARGE_TIME = 0.75
 DASH_COOLDOWN = 2.2
 DASH_DISTANCE = 7
 DASH_TRAIL_TTL = 0.18
@@ -240,19 +240,18 @@ class AsciiArenaGame:
 
     def fire_projectiles(self, player: Player, now: float, size: int):
         player.last_shot_at = now
-        dirs = [player.facing if player.facing != (0, 0) else (1, 0)]
+        base_dx, base_dy = player.facing if player.facing != (0, 0) else (1, 0)
+        shots = [(base_dx, base_dy, 0, 0)]
         if now < player.shotgun_until:
-            fx, fy = dirs[0]
-            spread = [(fx, fy), (fx + fy, fy + fx), (fx - fy, fy - fx)]
-            dirs = []
-            for dx, dy in spread:
-                ndx = 0 if dx == 0 else (1 if dx > 0 else -1)
-                ndy = 0 if dy == 0 else (1 if dy > 0 else -1)
-                if ndx == 0 and ndy == 0:
-                    ndx = 1
-                dirs.append((ndx, ndy))
-        for dx, dy in dirs:
-            self.projectiles.append(Projectile(player.x, player.y, dx, dy, player.level, player.pid, size=size))
+            px, py = -base_dy, base_dx
+            shots = [
+                (base_dx, base_dy, 0, 0),
+                (base_dx, base_dy, px, py),
+                (base_dx, base_dy, -px, -py),
+            ]
+        for dx, dy, ox, oy in shots:
+            sx, sy = self.clamp_in_arena(player.x + ox, player.y + oy)
+            self.projectiles.append(Projectile(sx, sy, dx, dy, player.level, player.pid, size=size))
 
     def start_or_update_charge(self, player: Player, now: float):
         if not player.charging:
@@ -270,7 +269,7 @@ class AsciiArenaGame:
         if now - player.last_charge_input_at < CHARGE_RELEASE_WINDOW and now - player.charge_started_at < MAX_CHARGE_TIME:
             return
         charge_time = max(0.0, min(MAX_CHARGE_TIME, now - player.charge_started_at))
-        size = 1 if charge_time < 0.25 else (2 if charge_time < 0.65 else 3)
+        size = 1 if charge_time < 0.15 else (2 if charge_time < 0.4 else 3)
         self.fire_projectiles(player, now, size)
         player.charging = False
 
@@ -405,7 +404,13 @@ class AsciiArenaGame:
                 if 0 <= px < self.arena_width and 0 <= py < self.arena_height:
                     grid[py][px] = glyph
 
-    def facing_indicator(self, player: Player) -> str:
+    def charge_tier(self, player: Player, now: float) -> int:
+        charge_time = max(0.0, min(MAX_CHARGE_TIME, now - player.charge_started_at))
+        return 1 if charge_time < 0.15 else (2 if charge_time < 0.4 else 3)
+
+    def facing_indicator(self, player: Player, now: float) -> str:
+        if player.charging:
+            return PROJECTILE_GLYPHS[player.level][self.charge_tier(player, now)]
         fx, fy = player.facing
         if abs(fx) >= abs(fy):
             return ">" if fx >= 0 else "<"
@@ -428,7 +433,7 @@ class AsciiArenaGame:
                 continue
             ax, ay = p.x + p.facing[0], p.y + p.facing[1]
             if 0 <= ax < self.arena_width and 0 <= ay < self.arena_height:
-                grid[ay][ax] = self.facing_indicator(p)
+                grid[ay][ax] = self.facing_indicator(p, now)
 
         def status(player: Player) -> str:
             dash_left = max(0.0, player.dash_cooldown(now) - (now - player.last_dash_at))

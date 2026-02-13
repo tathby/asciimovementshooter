@@ -21,12 +21,12 @@ No external dependencies are required.
   - **Medium** (`44x14`)
   - **Large** (`70x24`)
 - Shooting cooldown is **0.1s**.
-- Hold shoot to charge; release fires larger projectiles.
+- Hold shoot to charge; release fires larger projectiles (charge fills faster now).
 - Movement is disabled while charging, but you can still re-aim while charging.
-- Facing indicator arrows (`<`, `>`, `^`, `v`) show player aim direction.
+- Facing indicators show aim direction (`<`, `>`, `^`, `v`), and while charging they switch to the current charge projectile symbol.
 - Dash travels farther and leaves a short-lived trail indicator.
 - Timed powerups:
-  - `S` Shotgun (temporary 3-shot spread)
+  - `S` Shotgun (temporary tighter 3-shot spread)
   - `D` Dash Boost (temporary low dash cooldown)
   - `H` Shield (absorbs one bullet)
 - Scoring system: on a valid hit, scorer gains a point, popup appears, and pressing any key starts the next round while keeping score.
