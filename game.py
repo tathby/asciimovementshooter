@@ -13,7 +13,10 @@ else:
     import tty
 
 FRAME_TIME = 0.05
-SHOT_COOLDOWN = 0.22
+MOVE_HOLD_TIMEOUT = 0.35
+SHOT_COOLDOWN = 0.1
+CHARGE_RELEASE_WINDOW = 0.12
+MAX_CHARGE_TIME = 1.2
 DASH_COOLDOWN = 2.2
 DASH_DISTANCE = 7
 DASH_TRAIL_TTL = 0.18
@@ -32,11 +35,16 @@ LEVEL_JUMP = 2
 LEVEL_NAMES = {LEVEL_CROUCH: "CROUCH", LEVEL_NORMAL: "NORMAL", LEVEL_JUMP: "JUMP"}
 LEVEL_PLAYER_GLYPHS = {LEVEL_CROUCH: ".", LEVEL_NORMAL: "A", LEVEL_JUMP: "^"}
 LEVEL_PLAYER2_GLYPHS = {LEVEL_CROUCH: ",", LEVEL_NORMAL: "B", LEVEL_JUMP: "M"}
-LEVEL_PROJECTILE_GLYPHS = {LEVEL_CROUCH: ".", LEVEL_NORMAL: "*", LEVEL_JUMP: "O"}
+
+PROJECTILE_GLYPHS = {
+    LEVEL_CROUCH: {1: ".", 2: "o", 3: "O"},
+    LEVEL_NORMAL: {1: "*", 2: "#", 3: "@"},
+    LEVEL_JUMP: {1: "O", 2: "Q", 3: "0"},
+}
 
 ARENA_PRESETS = {
-    "small": (42, 14),
-    "medium": (56, 19),
+    "small": (30, 10),
+    "medium": (44, 14),
     "large": (70, 24),
 }
 
@@ -72,6 +80,7 @@ class Projectile:
     dy: int
     level: int
     owner: str
+    size: int = 1
 
 
 @dataclass
@@ -106,6 +115,12 @@ class Player:
     last_dash_at: float = -999.0
     jump_until: float = 0.0
     crouch_until: float = 0.0
+    move_dx: int = 0
+    move_dy: int = 0
+    move_until: float = 0.0
+    charging: bool = False
+    charge_started_at: float = 0.0
+    last_charge_input_at: float = 0.0
 
     def glyph(self) -> str:
         return LEVEL_PLAYER_GLYPHS[self.level] if self.pid == "p1" else LEVEL_PLAYER2_GLYPHS[self.level]
@@ -147,7 +162,7 @@ class Keyboard:
                         if scan in (42, 54, 160, 161):
                             keys.append("<shift>")
                     continue
-                keys.append("\n" if c == "\r" else c.lower())
+                keys.append("\n" if c == "\r" else c)
         else:
             while True:
                 readable, _, _ = select.select([sys.stdin], [], [], 0)
@@ -249,22 +264,59 @@ class AsciiArenaGame:
                     self.apply_powerup(player, pu.kind, now)
                     self.powerups.remove(pu)
 
+    def normalize_key(self, key: str) -> str:
+        if key in ("\x1b", "<shift>"):
+            return key
+        if key.isalpha():
+            return key.lower()
+        return key
+
     def update_level_state(self, player: Player, now: float):
         if player.level == LEVEL_JUMP and now >= player.jump_until:
             player.level = LEVEL_NORMAL
         if player.level == LEVEL_CROUCH and now >= player.crouch_until:
             player.level = LEVEL_NORMAL
 
-    def normalize_key(self, key: str) -> str:
-        if key == "\x1b":
-            return key
-        if key in ("\x00", "\xe0"):
-            return key
-        if key.isalpha():
-            return key.lower()
-        if key == "\x10":  # Ctrl+P fallback sometimes emitted on odd terminals
-            return "<shift>"
-        return key
+    def fire_projectiles(self, player: Player, now: float, size: int):
+        player.last_shot_at = now
+        dirs = [player.facing if player.facing != (0, 0) else (1, 0)]
+        if now < player.shotgun_until:
+            fx, fy = dirs[0]
+            spread = [(fx, fy), (fx + fy, fy + fx), (fx - fy, fy - fx)]
+            dirs = []
+            for dx, dy in spread:
+                ndx = 0 if dx == 0 else (1 if dx > 0 else -1)
+                ndy = 0 if dy == 0 else (1 if dy > 0 else -1)
+                if ndx == 0 and ndy == 0:
+                    ndx = 1
+                dirs.append((ndx, ndy))
+        for dx, dy in dirs:
+            self.projectiles.append(Projectile(player.x, player.y, dx, dy, player.level, player.pid, size=size))
+
+    def start_or_update_charge(self, player: Player, now: float):
+        if not player.charging:
+            if not player.can_shoot(now):
+                return
+            player.charging = True
+            player.charge_started_at = now
+            player.last_charge_input_at = now
+            return
+        player.last_charge_input_at = now
+
+    def maybe_release_charge(self, player: Player, now: float):
+        if not player.charging:
+            return
+        if now - player.last_charge_input_at < CHARGE_RELEASE_WINDOW and now - player.charge_started_at < MAX_CHARGE_TIME:
+            return
+        charge_time = max(0.0, min(MAX_CHARGE_TIME, now - player.charge_started_at))
+        if charge_time < 0.25:
+            size = 1
+        elif charge_time < 0.65:
+            size = 2
+        else:
+            size = 3
+        self.fire_projectiles(player, now, size)
+        player.charging = False
 
     def handle_key_for_player(self, player: Player, key: str, now: float):
         m = KEYMAP[player.pid]
@@ -278,9 +330,10 @@ class AsciiArenaGame:
         elif key == m["right"]:
             dx = 1
 
-        if dx or dy:
+        if dx or dy and not player.charging:
             player.facing = (dx, dy)
-            player.x, player.y = self.clamp_in_arena(player.x + dx, player.y + dy)
+            player.move_dx, player.move_dy = dx, dy
+            player.move_until = now + MOVE_HOLD_TIMEOUT
 
         if key == m["jump"]:
             player.level = LEVEL_JUMP
@@ -291,7 +344,13 @@ class AsciiArenaGame:
         elif key == m["dash"]:
             self.dash(player, now)
         elif key == m["shoot"]:
-            self.shoot(player, now)
+            self.start_or_update_charge(player, now)
+
+    def apply_continuous_movement(self, player: Player, now: float):
+        if player.charging:
+            return
+        if now <= player.move_until and (player.move_dx or player.move_dy):
+            player.x, player.y = self.clamp_in_arena(player.x + player.move_dx, player.y + player.move_dy)
 
     def handle_inputs(self, keys: List[str], now: float):
         normalized = [self.normalize_key(k) for k in keys]
@@ -307,7 +366,9 @@ class AsciiArenaGame:
                 self.handle_key_for_player(player, key, now)
 
         for player in self.players.values():
+            self.apply_continuous_movement(player, now)
             self.update_level_state(player, now)
+            self.maybe_release_charge(player, now)
 
     def run_bot(self, now: float):
         if not self.bot_mode:
@@ -326,29 +387,13 @@ class AsciiArenaGame:
         elif action == "dash":
             self.handle_key_for_player(bot, "p", now)
         elif action == "shoot":
-            self.handle_key_for_player(bot, "u", now)
+            if bot.can_shoot(now):
+                self.fire_projectiles(bot, now, 1)
+        self.apply_continuous_movement(bot, now)
         self.update_level_state(bot, now)
 
-    def shoot(self, player: Player, now: float):
-        if not player.can_shoot(now):
-            return
-        player.last_shot_at = now
-        dirs = [player.facing if player.facing != (0, 0) else (1, 0)]
-        if now < player.shotgun_until:
-            fx, fy = dirs[0]
-            spread = [(fx, fy), (fx + fy, fy + fx), (fx - fy, fy - fx)]
-            dirs = []
-            for dx, dy in spread:
-                ndx = 0 if dx == 0 else (1 if dx > 0 else -1)
-                ndy = 0 if dy == 0 else (1 if dy > 0 else -1)
-                if ndx == 0 and ndy == 0:
-                    ndx = 1
-                dirs.append((ndx, ndy))
-        for dx, dy in dirs:
-            self.projectiles.append(Projectile(player.x, player.y, dx, dy, player.level, player.pid))
-
     def dash(self, player: Player, now: float):
-        if not player.can_dash(now):
+        if player.charging or not player.can_dash(now):
             return
         player.last_dash_at = now
         dx, dy = player.facing
@@ -365,6 +410,12 @@ class AsciiArenaGame:
 
         player.x, player.y = self.clamp_in_arena(player.x + dx * DASH_DISTANCE, player.y + dy * DASH_DISTANCE)
 
+    def projectile_hits_player(self, proj: Projectile, player: Player) -> bool:
+        if player.level != proj.level:
+            return False
+        radius = max(0, proj.size - 1)
+        return abs(player.x - proj.x) + abs(player.y - proj.y) <= radius
+
     def step_projectiles(self) -> Optional[str]:
         scorer = None
         for _ in range(PROJECTILE_SPEED):
@@ -378,7 +429,7 @@ class AsciiArenaGame:
                 for pid, player in self.players.items():
                     if pid == proj.owner or not player.alive:
                         continue
-                    if (player.x, player.y, player.level) == (proj.x, proj.y, proj.level):
+                    if self.projectile_hits_player(proj, player):
                         if player.shield:
                             player.shield = False
                         else:
@@ -396,6 +447,17 @@ class AsciiArenaGame:
     def step_dash_trails(self, now: float):
         self.dash_trails = [t for t in self.dash_trails if now < t.expires_at]
 
+    def draw_projectile(self, grid: List[List[str]], proj: Projectile):
+        radius = max(0, proj.size - 1)
+        glyph = PROJECTILE_GLYPHS[proj.level][proj.size]
+        for ox in range(-radius, radius + 1):
+            for oy in range(-radius, radius + 1):
+                if abs(ox) + abs(oy) > radius:
+                    continue
+                px, py = proj.x + ox, proj.y + oy
+                if 0 <= px < self.arena_width and 0 <= py < self.arena_height:
+                    grid[py][px] = glyph
+
     def render(self, now: float):
         grid = [[" " for _ in range(self.arena_width)] for _ in range(self.arena_height)]
 
@@ -406,8 +468,7 @@ class AsciiArenaGame:
         for pu in self.powerups:
             grid[pu.y][pu.x] = {"shotgun": "S", "dash_boost": "D", "shield": "H"}[pu.kind]
         for proj in self.projectiles:
-            if 0 <= proj.x < self.arena_width and 0 <= proj.y < self.arena_height:
-                grid[proj.y][proj.x] = LEVEL_PROJECTILE_GLYPHS[proj.level]
+            self.draw_projectile(grid, proj)
         for p in self.players.values():
             if p.alive:
                 grid[p.y][p.x] = p.glyph()
@@ -422,7 +483,11 @@ class AsciiArenaGame:
                 buffs.append("DASH+")
             if player.shield:
                 buffs.append("SHIELD")
-            return f"{player.name} LVL:{LEVEL_NAMES[player.level]:6} DASH:{dash_left:>4.1f}s SHOT:{shot_left:>4.2f}s BUFFS:{','.join(buffs) if buffs else '-'}"
+            charge = " CHARGING" if player.charging else ""
+            return (
+                f"{player.name} LVL:{LEVEL_NAMES[player.level]:6} DASH:{dash_left:>4.1f}s "
+                f"SHOT:{shot_left:>4.2f}s BUFFS:{','.join(buffs) if buffs else '-'}{charge}"
+            )
 
         score_line = (
             f"ARENA:{self.arena_size_name.upper():6}  SCORE  P1:{self.scores['p1']}  "
@@ -433,7 +498,7 @@ class AsciiArenaGame:
             lines.append("#" + "".join(row) + "#")
         lines.append("#" * (self.arena_width + 2))
         lines.append(status(self.players["p2"]))
-        lines.append("ESC: menu | Dash leaves a short trail")
+        lines.append("ESC: menu | hold shoot to charge | movement disabled while charging")
 
         clear_screen()
         print("\n".join(lines), flush=True)
@@ -475,10 +540,11 @@ class AsciiArenaGame:
     def show_controls(self):
         clear_screen()
         print("=== CONTROLS ===\n")
-        print("P1: W/A/S/D move | E jump | LEFT SHIFT crouch | R dash | Q shoot")
-        print("P2: I/J/K/L move | O jump | H crouch | P dash | U shoot")
+        print("P1: W/A/S/D move | E jump | LEFT SHIFT crouch | R dash | Q shoot (hold to charge)")
+        print("P2: I/J/K/L move | O jump | H crouch | P dash | U shoot (hold to charge)")
         print("Jump auto-returns to normal level after a short time.")
         print("Crouch returns to normal when crouch key is no longer held/repeated.")
+        print("Movement continues while holding direction and stops during shot charge.")
         print("Projectiles only hit opponents on the same vertical level.")
         print("\nPress Enter to return.")
         input()
