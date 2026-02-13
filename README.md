@@ -12,7 +12,7 @@ No external dependencies are required.
 
 ## Highlights
 
-- Top-down arena with **3 vertical levels**: crouch, normal, jump.
+- Top-down arena with **2 vertical levels** now: normal and jump.
 - Main menu modes:
   - **1v1 Local**
   - **Versus Bot** (simple random-move AI)
@@ -20,12 +20,10 @@ No external dependencies are required.
   - **Small** (`30x10`)
   - **Medium** (`44x14`)
   - **Large** (`70x24`)
-- Jump auto-returns to normal level after a short pause.
-- Crouch returns to normal when crouch input is released/not repeated.
-- Projectiles are level-specific and only hit targets on the same vertical level.
-- Shooting cooldown reduced to **0.1s**.
+- Shooting cooldown is **0.1s**.
 - Hold shoot to charge; release fires larger projectiles.
-- Movement is disabled while charging.
+- Movement is disabled while charging, but you can still re-aim while charging.
+- Facing indicator arrows (`<`, `>`, `^`, `v`) show player aim direction.
 - Dash travels farther and leaves a short-lived trail indicator.
 - Timed powerups:
   - `S` Shotgun (temporary 3-shot spread)
@@ -35,8 +33,6 @@ No external dependencies are required.
 
 ## Controls
 
-- **P1**: `W A S D` move, `E` jump, `Left Shift` crouch, `R` dash, `Q` shoot/charge
-- **P2**: `I J K L` move, `O` jump, `H` crouch, `P` dash, `U` shoot/charge
+- **P1**: `W A S D` move, `E` jump, `R` dash, `Q` shoot/charge
+- **P2**: `I J K L` move, `O` jump, `P` dash, `U` shoot/charge
 - During match: `ESC` returns to menu.
-
-> Note: standalone `Left Shift` key reporting can vary across terminals/OSes, but dedicated Shift scan-code handling was added for Windows consoles.
