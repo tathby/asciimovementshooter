@@ -24,6 +24,8 @@ POWERUP_LIFETIME = 14.0
 SHOTGUN_DURATION = 10.0
 DASH_BOOST_DURATION = 10.0
 DASH_BOOST_COOLDOWN = 0.6
+JUMP_DURATION = 0.45
+CROUCH_GRACE = 0.12
 
 LEVEL_CROUCH = 0
 LEVEL_NORMAL = 1
@@ -39,22 +41,20 @@ KEYMAP = {
         "down": "s",
         "left": "a",
         "right": "d",
-        "jump": "r",
-        "crouch": "f",
-        "dash": "g",
-        "shoot": "t",
-        "normal": "v",
+        "jump": "e",
+        "crouch": "<shift>",
+        "dash": "r",
+        "shoot": "q",
     },
     "p2": {
         "up": "i",
         "down": "k",
         "left": "j",
         "right": "l",
-        "jump": "u",
-        "crouch": "o",
+        "jump": "o",
+        "crouch": "h",
         "dash": "p",
-        "shoot": "y",
-        "normal": "m",
+        "shoot": "u",
     },
 }
 
@@ -91,6 +91,8 @@ class Player:
     dash_boost_until: float = 0.0
     last_shot_at: float = -999.0
     last_dash_at: float = -999.0
+    jump_until: float = 0.0
+    crouch_until: float = 0.0
 
     def glyph(self) -> str:
         return LEVEL_PLAYER_GLYPHS[self.level] if self.pid == "p1" else LEVEL_PLAYER2_GLYPHS[self.level]
@@ -128,20 +130,34 @@ class Keyboard:
                 c = msvcrt.getwch()
                 if c in ("\x00", "\xe0"):
                     if msvcrt.kbhit():
-                        msvcrt.getwch()
+                        scan = msvcrt.getwch()
+                        if scan == "\xa0":
+                            keys.append("<shift>")
                     continue
-                keys.append(c.lower())
+                if c == "\r":
+                    keys.append("\n")
+                else:
+                    keys.append(c.lower())
         else:
             while True:
                 readable, _, _ = select.select([sys.stdin], [], [], 0)
                 if not readable:
                     break
                 c = sys.stdin.read(1)
-                if c:
-                    keys.append(c.lower())
-                else:
+                if not c:
                     break
+                if c == "\x1b":
+                    keys.append("\x1b")
+                else:
+                    keys.append(c.lower())
         return keys
+
+    def wait_for_any_key(self):
+        while True:
+            keys = self.get_keys()
+            if keys:
+                return
+            time.sleep(0.03)
 
 
 def clear_screen():
@@ -154,17 +170,18 @@ class AsciiArenaGame:
         self.projectiles: List[Projectile] = []
         self.powerups: List[PowerUp] = []
         self.last_spawn_at = time.time()
-        self.winner: Optional[Player] = None
+        self.scores = {"p1": 0, "p2": 0}
+        self.bot_mode = False
+        self.last_bot_action = 0.0
 
     def reset_round(self):
         self.players = {
             "p1": Player("p1", "P1", 8, ARENA_HEIGHT // 2, facing=(1, 0)),
-            "p2": Player("p2", "P2", ARENA_WIDTH - 9, ARENA_HEIGHT // 2, facing=(-1, 0)),
+            "p2": Player("p2", "BOT" if self.bot_mode else "P2", ARENA_WIDTH - 9, ARENA_HEIGHT // 2, facing=(-1, 0)),
         }
         self.projectiles = []
         self.powerups = []
         self.last_spawn_at = time.time()
-        self.winner = None
 
     def clamp_in_arena(self, x: int, y: int) -> Tuple[int, int]:
         return max(0, min(ARENA_WIDTH - 1, x)), max(0, min(ARENA_HEIGHT - 1, y))
@@ -197,36 +214,75 @@ class AsciiArenaGame:
                     self.apply_powerup(player, pu.kind, now)
                     self.powerups.remove(pu)
 
-    def handle_key(self, key: str, now: float):
-        if key == "q":
-            raise KeyboardInterrupt
-        for player in self.players.values():
-            if not player.alive:
-                continue
-            m = KEYMAP[player.pid]
-            dx, dy = 0, 0
-            if key == m["up"]:
-                dy = -1
-            elif key == m["down"]:
-                dy = 1
-            elif key == m["left"]:
-                dx = -1
-            elif key == m["right"]:
-                dx = 1
-            if dx or dy:
-                player.facing = (dx, dy)
-                player.x, player.y = self.clamp_in_arena(player.x + dx, player.y + dy)
+    def update_level_state(self, player: Player, now: float):
+        if player.level == LEVEL_JUMP and now >= player.jump_until:
+            player.level = LEVEL_NORMAL
+        if player.level == LEVEL_CROUCH and now >= player.crouch_until:
+            player.level = LEVEL_NORMAL
 
-            if key == m["jump"]:
-                player.level = LEVEL_JUMP
-            elif key == m["crouch"]:
-                player.level = LEVEL_CROUCH
-            elif key == m["normal"]:
-                player.level = LEVEL_NORMAL
-            elif key == m["dash"]:
-                self.dash(player, now)
-            elif key == m["shoot"]:
-                self.shoot(player, now)
+    def handle_key_for_player(self, player: Player, key: str, now: float):
+        m = KEYMAP[player.pid]
+        dx, dy = 0, 0
+        if key == m["up"]:
+            dy = -1
+        elif key == m["down"]:
+            dy = 1
+        elif key == m["left"]:
+            dx = -1
+        elif key == m["right"]:
+            dx = 1
+
+        if dx or dy:
+            player.facing = (dx, dy)
+            player.x, player.y = self.clamp_in_arena(player.x + dx, player.y + dy)
+
+        if key == m["jump"]:
+            player.level = LEVEL_JUMP
+            player.jump_until = now + JUMP_DURATION
+        elif key == m["crouch"]:
+            player.level = LEVEL_CROUCH
+            player.crouch_until = now + CROUCH_GRACE
+        elif key == m["dash"]:
+            self.dash(player, now)
+        elif key == m["shoot"]:
+            self.shoot(player, now)
+
+    def handle_inputs(self, keys: List[str], now: float):
+        if "q" in keys and not self.bot_mode:
+            raise KeyboardInterrupt
+        if "\x1b" in keys:
+            raise KeyboardInterrupt
+
+        for key in keys:
+            for player in self.players.values():
+                if not player.alive:
+                    continue
+                if self.bot_mode and player.pid == "p2":
+                    continue
+                self.handle_key_for_player(player, key, now)
+
+        for player in self.players.values():
+            self.update_level_state(player, now)
+
+    def run_bot(self, now: float):
+        if not self.bot_mode:
+            return
+        bot = self.players["p2"]
+        if not bot.alive or now - self.last_bot_action < 0.16:
+            return
+        self.last_bot_action = now
+        action = random.choice(["move", "move", "move", "jump", "crouch", "dash", "shoot"])
+        if action == "move":
+            self.handle_key_for_player(bot, random.choice(["i", "j", "k", "l"]), now)
+        elif action == "jump":
+            self.handle_key_for_player(bot, "o", now)
+        elif action == "crouch":
+            self.handle_key_for_player(bot, "h", now)
+        elif action == "dash":
+            self.handle_key_for_player(bot, "p", now)
+        elif action == "shoot":
+            self.handle_key_for_player(bot, "u", now)
+        self.update_level_state(bot, now)
 
     def shoot(self, player: Player, now: float):
         if not player.can_shoot(now):
@@ -255,7 +311,8 @@ class AsciiArenaGame:
             dx = 1 if player.pid == "p1" else -1
         player.x, player.y = self.clamp_in_arena(player.x + dx * DASH_DISTANCE, player.y + dy * DASH_DISTANCE)
 
-    def step_projectiles(self):
+    def step_projectiles(self) -> Optional[str]:
+        scorer = None
         for _ in range(PROJECTILE_SPEED):
             survivors = []
             for proj in self.projectiles:
@@ -272,23 +329,23 @@ class AsciiArenaGame:
                             player.shield = False
                         else:
                             player.alive = False
-                            self.winner = self.players[proj.owner]
+                            scorer = proj.owner
                         hit = True
                         break
                 if not hit:
                     survivors.append(proj)
             self.projectiles = survivors
+            if scorer:
+                return scorer
+        return None
 
     def render(self, now: float):
         grid = [[" " for _ in range(ARENA_WIDTH)] for _ in range(ARENA_HEIGHT)]
-
         for pu in self.powerups:
             grid[pu.y][pu.x] = {"shotgun": "S", "dash_boost": "D", "shield": "H"}[pu.kind]
-
         for proj in self.projectiles:
             if 0 <= proj.x < ARENA_WIDTH and 0 <= proj.y < ARENA_HEIGHT:
                 grid[proj.y][proj.x] = LEVEL_PROJECTILE_GLYPHS[proj.level]
-
         for p in self.players.values():
             if p.alive:
                 grid[p.y][p.x] = p.glyph()
@@ -306,53 +363,46 @@ class AsciiArenaGame:
             buff_text = ",".join(buffs) if buffs else "-"
             return f"{player.name} LVL:{LEVEL_NAMES[player.level]:6} DASH:{dash_left:>4.1f}s SHOT:{shot_left:>4.2f}s BUFFS:{buff_text}"
 
-        lines = [status(self.players["p1"]), "#" * (ARENA_WIDTH + 2)]
+        score_line = f"SCORE  P1:{self.scores['p1']}   {self.players['p2'].name}:{self.scores['p2']}"
+        lines = [score_line, status(self.players["p1"]), "#" * (ARENA_WIDTH + 2)]
         for row in grid:
             lines.append("#" + "".join(row) + "#")
         lines.append("#" * (ARENA_WIDTH + 2))
         lines.append(status(self.players["p2"]))
-        lines.append("ESC/Q: menu | P1 normal level: V | P2 normal level: M")
+        lines.append("ESC: menu | P1 crouch: Left Shift* | P2 crouch: H")
 
         clear_screen()
         print("\n".join(lines), flush=True)
 
-    def round_over(self):
+    def show_point_popup(self, scorer_pid: str, kb: Keyboard):
+        self.scores[scorer_pid] += 1
+        winner_name = self.players[scorer_pid].name
         clear_screen()
-        print(f"{self.winner.name} WINS! ONE SHOT, ONE LIFE.\n")
-        print("Press [R] for rematch, or [Enter] for main menu.")
-        while True:
-            choice = input("> ").strip().lower()
-            if choice == "r":
-                self.run_match()
-                return
-            if choice == "":
-                return
+        print(f"{winner_name} scored a point!\n")
+        print(f"Current score: P1 {self.scores['p1']} - {self.players['p2'].name} {self.scores['p2']}")
+        print("\nPress any key to continue...")
+        kb.wait_for_any_key()
 
-    def run_match(self):
+    def run_match(self, versus_bot: bool = False):
+        self.bot_mode = versus_bot
+        self.last_bot_action = 0.0
         self.reset_round()
         with Keyboard() as kb:
             try:
                 while True:
                     now = time.time()
-                    for key in kb.get_keys():
-                        if key in ("\x1b", "q"):
-                            return
-                        self.handle_key(key, now)
+                    keys = kb.get_keys()
+                    self.handle_inputs(keys, now)
+                    self.run_bot(now)
 
                     self.spawn_powerup_if_needed(now)
                     self.handle_pickups(now)
-                    self.step_projectiles()
-
-                    if not self.players["p1"].alive:
-                        self.winner = self.players["p2"]
-                    elif not self.players["p2"].alive:
-                        self.winner = self.players["p1"]
+                    scorer = self.step_projectiles()
 
                     self.render(now)
-
-                    if self.winner:
-                        self.round_over()
-                        return
+                    if scorer:
+                        self.show_point_popup(scorer, kb)
+                        self.reset_round()
                     time.sleep(FRAME_TIME)
             except KeyboardInterrupt:
                 return
@@ -360,10 +410,11 @@ class AsciiArenaGame:
     def show_controls(self):
         clear_screen()
         print("=== CONTROLS ===\n")
-        print("P1: W/A/S/D move | R jump | F crouch | V normal level | G dash | T shoot")
-        print("P2: I/J/K/L move | U jump | O crouch | M normal level | P dash | Y shoot")
+        print("P1: W/A/S/D move | E jump | LEFT SHIFT crouch | R dash | Q shoot")
+        print("P2: I/J/K/L move | O jump | H crouch | P dash | U shoot")
+        print("Jump auto-returns to normal level after a short time.")
+        print("Crouch returns to normal when crouch key is no longer held/repeated.")
         print("Projectiles only hit opponents on the same vertical level.")
-        print("Jump and crouch change ASCII size to simulate Z-level.")
         print("\nPress Enter to return.")
         input()
 
@@ -389,19 +440,22 @@ class AsciiArenaGame:
   \___/|_____/ \_____|___|___| \___/|_| \_| |_| \_|\___/
 """)
             print("ASCII 3-LAYER DUEL ARENA\n")
-            print("1) Start Match")
-            print("2) Controls")
-            print("3) Powerups")
-            print("4) Quit")
+            print("1) 1v1 Local")
+            print("2) Versus Bot")
+            print("3) Controls")
+            print("4) Powerups")
+            print("5) Quit")
             choice = input("\nSelect option: ").strip()
 
             if choice == "1":
-                self.run_match()
+                self.run_match(versus_bot=False)
             elif choice == "2":
-                self.show_controls()
+                self.run_match(versus_bot=True)
             elif choice == "3":
-                self.show_powerups()
+                self.show_controls()
             elif choice == "4":
+                self.show_powerups()
+            elif choice == "5":
                 clear_screen()
                 return
 
